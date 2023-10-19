@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: (LGPL-2.1-only OR LGPL-3.0-only)
-use anyhow::{bail, Context, Result};
+use anyhow::{Result};
 use clap::{App, Arg, SubCommand};
 use log::warn;
-use packetcrypt_annhandler::annhandler;
 use packetcrypt_annmine::annmine;
-use packetcrypt_blkmine::blkmine;
-use packetcrypt_pool::{paymakerclient, poolcfg};
-use packetcrypt_util::{poolclient, util};
+use packetcrypt_util::{util};
 use std::path;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
@@ -55,42 +52,6 @@ async fn exiter() -> Result<()> {
 async fn exiter() -> Result<()> {
     Ok(())
 }
-
-async fn ah_main(config: &str, handler: &str) -> Result<()> {
-    let confb = tokio::fs::read(config)
-        .await
-        .with_context(|| format!("Failed to read config file [{}]", config))?;
-    let mut cfg: poolcfg::Config = toml::de::from_slice(&confb[..])
-        .with_context(|| format!("Failed to parse config file [{}]", config))?;
-
-    let hconf = if let Some(x) = cfg.ann_handler.remove(handler) {
-        x
-    } else {
-        bail!("{} is not defined in the config file [{}]", handler, config);
-    };
-
-    let pc = poolclient::new(&cfg.master_url, 6, 5);
-
-    let pmc = paymakerclient::new(
-        &pc,
-        paymakerclient::PaymakerClientCfg {
-            paylogdir: format!("{}/ah/paylogdir", &cfg.root_workdir),
-            password: cfg.paymaker_http_password,
-            paylog_submit_every_ms: 60_000,
-        },
-    )
-    .await?;
-    paymakerclient::start(&pmc).await;
-
-    let ah = annhandler::new(&pc, &pmc, hconf).await?;
-    annhandler::start(&ah).await;
-
-    poolclient::start(&pc).await;
-
-    // All of the threads and jobs are setup, put the main thread to sleep
-    util::sleep_forever().await
-}
-
 const DEFAULT_ADDR: &str = "pkt1q6hqsqhqdgqfd8t3xwgceulu7k9d9w5t2amath0qxyfjlvl3s3u4sjza2g2";
 
 fn warn_if_addr_default(payment_addr: &str) -> &str {
@@ -103,14 +64,6 @@ fn warn_if_addr_default(payment_addr: &str) -> &str {
 
     payment_addr
 }
-
-async fn blk_main(ba: blkmine::BlkArgs) -> Result<()> {
-    warn_if_addr_default(&ba.payment_addr);
-    let bm = blkmine::new(ba).await?;
-    bm.start().await?;
-    util::sleep_forever().await
-}
-
 async fn ann_load_config(
     pools: Vec<String>,
     threads: usize,
@@ -209,31 +162,6 @@ async fn ann_main(
     util::sleep_forever().await
 }
 
-async fn sprayer_main(cfg: packetcrypt_sprayer::Config) -> Result<()> {
-    packetcrypt_sprayer::Sprayer::new(&cfg)?.start();
-    util::sleep_forever().await
-}
-
-/// Benchmark hashes per second in block mining.
-async fn bench_blk(max_mem: u64, threads: u32) -> Result<()> {
-    const REPEAT: u32 = 10;
-    const SAMPLING_MS: u64 = 5000;
-    let bencher = packetcrypt_blkmine::bench::Bencher::new(REPEAT, SAMPLING_MS);
-    tokio::task::spawn_blocking(move || bencher.bench_blk(max_mem, threads))
-        .await
-        .unwrap()
-}
-
-/// Benchmark encryptions per second in ann mining.
-async fn bench_ann(threads: usize) -> Result<()> {
-    const REPEAT: u32 = 10;
-    const SAMPLING_MS: u64 = 5000;
-    let bencher = packetcrypt_blkmine::bench::Bencher::new(REPEAT, SAMPLING_MS);
-    tokio::task::spawn_blocking(move || bencher.bench_ann(threads))
-        .await
-        .unwrap()
-}
-
 macro_rules! get_strs {
     ($m:ident, $s:expr) => {
         if let Some(x) = $m.values_of($s) {
@@ -308,85 +236,6 @@ async fn async_main(matches: clap::ArgMatches<'_>) -> Result<()> {
 
         ann_main(config)
         .await?;
-    } else if let Some(ah) = matches.subcommand_matches("ah") {
-        // ann handler
-        let config = get_str!(ah, "config");
-        let handler = get_str!(ah, "handler");
-        ah_main(config, handler).await?;
-    } else if let Some(blk) = matches.subcommand_matches("blk") {
-        let spray_cfg = if blk.is_present("subscribe") {
-            let passwd: String = get_str!(blk, "handlerpass").into();
-            if passwd.is_empty() {
-                bail!("When sprayer is enabled, --handlerpass is required");
-            }
-            let bind: String = get_str!(blk, "bind").into();
-            if bind.is_empty() {
-                bail!("When sprayer is enabled, --bind is required");
-            }
-            let subscribe_to = get_strs!(blk, "subscribe");
-            let workers = get_usize!(blk, "sprayerthreads");
-            let mss = get_usize!(blk, "mss");
-            let mcast = if blk.is_present("mcast") {
-                get_str!(blk, "mcast")
-            } else {
-                ""
-            }
-            .to_owned();
-            Some(packetcrypt_sprayer::Config {
-                passwd,
-                bind,
-                workers,
-                subscribe_to,
-                log_peer_stats: false,
-                mss,
-                spray_at: Vec::new(),
-                mcast,
-            })
-        } else {
-            if blk.is_present("bind") {
-                bail!("--bind (bind UDP sprayer socket) is nonsensical without --subscribe");
-            }
-            None
-        };
-        blk_main(blkmine::BlkArgs {
-            max_mem: get_usize!(blk, "memorysizemb") * 1024 * 1024,
-            min_free_space: get_num!(blk, "minfree", f64),
-            payment_addr: get_str!(blk, "paymentaddr").into(),
-            threads: get_usize!(blk, "threads"),
-            downloader_count: get_usize!(blk, "downloaders"),
-            pool_master: get_str!(blk, "pool").into(),
-            upload_timeout: get_usize!(blk, "uploadtimeout"),
-            uploaders: get_usize!(blk, "uploaders"),
-            handler_pass: get_str!(blk, "handlerpass").into(),
-            spray_cfg,
-        })
-        .await?;
-    } else if let Some(spray) = matches.subcommand_matches("sprayer") {
-        let spray_at = if spray.is_present("sprayat") {
-            get_strs!(spray, "sprayat")
-        } else {
-            Vec::new()
-        };
-        sprayer_main(packetcrypt_sprayer::Config {
-            passwd: get_str!(spray, "passwd").into(),
-            bind: get_str!(spray, "bind").into(),
-            workers: get_usize!(spray, "threads"),
-            subscribe_to: get_strs!(spray, "subscribe"),
-            log_peer_stats: true,
-            mss: get_usize!(spray, "mss"),
-            spray_at,
-            mcast: "".to_owned(),
-        })
-        .await?;
-    } else if let Some(bench) = matches.subcommand_matches("bench") {
-        if let Some(blk) = bench.subcommand_matches("blk") {
-            let max_mem = get_num!(blk, "memorysizemb", u64) * 1024 * 1024;
-            let threads = get_num!(blk, "threads", u32);
-            bench_blk(max_mem, threads).await?;
-        } else if let Some(ann) = bench.subcommand_matches("ann") {
-            let threads = get_num!(ann, "threads", usize);
-            bench_ann(threads).await?;
-        }
     }
     Ok(())
 }
@@ -430,24 +279,6 @@ async fn main() -> Result<()> {
                 .long("verbose")
                 .multiple(true)
                 .help("Verbose logging"),
-        )
-        .subcommand(
-            SubCommand::with_name("ah")
-                .about("Run announcement handler")
-                .arg(
-                    Arg::with_name("config")
-                        .short("C")
-                        .long("config")
-                        .help("Select the config file, default: pool.toml")
-                        .default_value("./pool.toml")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("handler")
-                        .help("Name of the announcment handler in the config (e.g. ann0)")
-                        .required(true)
-                        .index(1),
-                ),
         )
         .subcommand(
             SubCommand::with_name("ann")
@@ -504,204 +335,6 @@ async fn main() -> Result<()> {
                         .takes_value(true),
                 ),
                 
-        )
-        .subcommand(
-            SubCommand::with_name("blk")
-                .about("Run block miner")
-                .arg(
-                    Arg::with_name("paymentaddr")
-                        .short("p")
-                        .long("paymentaddr")
-                        .help("Address to request payment for mining")
-                        .default_value(DEFAULT_ADDR),
-                )
-                .arg(
-                    Arg::with_name("threads")
-                        .short("t")
-                        .long("threads")
-                        .help("Number of threads to mine with")
-                        .default_value(&cpus_str)
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("downloaders")
-                        .short("d")
-                        .long("downloaders")
-                        .help("Max concurrent downloads (per handler)")
-                        .default_value("30")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("minfree")
-                        .short("f")
-                        .long("minfree")
-                        .help("Minimum fraction of free space to keep in work buffer")
-                        .default_value("0.1")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("memorysizemb")
-                        .short("m")
-                        .long("memorysizemb")
-                        .help("Size of memory work buffer in MB")
-                        .default_value("4096")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("pool")
-                        .help("The pool server to use")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::with_name("uploadtimeout")
-                        .short("T")
-                        .long("uploadtimeout")
-                        .help("How long to wait for a reply before aborting an upload")
-                        .default_value("30")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("handlerpass")
-                        .short("P")
-                        .long("handlerpass")
-                        .help("Password to use for pulling anns from the handlers")
-                        .default_value("")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("subscribe")
-                        .short("s")
-                        .long("subscribe")
-                        .help("Sprayer interface to subscribe to")
-                        .takes_value(true)
-                        .min_values(1),
-                )
-                .arg(
-                    Arg::with_name("sprayerthreads")
-                        .short("S")
-                        .long("sprayerthreads")
-                        .help("Number of threads to run in the sprayer interface")
-                        .default_value("4")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("bind")
-                        .short("b")
-                        .long("bind")
-                        .help("UDP socket to bind to for sprayer interface")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("uploaders")
-                        .short("u")
-                        .long("uploaders")
-                        .help("Number of share-upload threads, be careful not to overload the block handlers")
-                        .default_value("4")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("mss")
-                        .short("M")
-                        .long("maxsegmentsize")
-                        .help("Maximum packet size to send when using UDP sprayer, remember IP and UDP overhead")
-                        .default_value("1472")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("mcast")
-                    .long("mcast")
-                    .help("Connect to this multicast group")
-                    .takes_value(true),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("sprayer")
-                .about("Launch ann sprayer daemon")
-                .arg(
-                    Arg::with_name("threads")
-                        .short("t")
-                        .long("threads")
-                        .help("Number of sprayer threads to run")
-                        .default_value("4")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("bind")
-                        .short("b")
-                        .long("bind")
-                        .help("Address to bind to")
-                        .takes_value(true)
-                        .required(true),
-                )
-                .arg(
-                    Arg::with_name("passwd")
-                        .short("P")
-                        .long("passwd")
-                        .help("Password to use for authing with other sprayers")
-                        .default_value("")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("subscribe")
-                        .short("s")
-                        .long("subscribe")
-                        .help("Sprayers so subscribe to")
-                        .required(true)
-                        .min_values(1),
-                )
-                .arg(
-                    Arg::with_name("sprayat")
-                        .short("S")
-                        .long("sprayat")
-                        .help("Always spray at these addresses")
-                        .min_values(1),
-                )
-                .arg(
-                    Arg::with_name("mss")
-                        .short("M")
-                        .long("maxsegmentsize")
-                        .help("Maximum packet size to send, remember IP and UDP overhead")
-                        .default_value("1472")
-                        .takes_value(true)
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("bench")
-                .about("Benchmark the performance of mining operations")
-                .setting(clap::AppSettings::ArgRequiredElseHelp)
-                .subcommand(
-                    SubCommand::with_name("blk")
-                    .about("Benchmark the hashes per second of a block mining")
-                    .arg(
-                        Arg::with_name("memorysizemb")
-                            .short("m")
-                            .long("memorysizemb")
-                            .help("Size of memory work buffer in MB")
-                            .default_value("4096")
-                            .takes_value(true),
-                    )
-                    .arg(
-                        Arg::with_name("threads")
-                            .short("t")
-                            .long("threads")
-                            .help("Number of threads to mine with")
-                            .default_value(&cpus_str)
-                            .takes_value(true),
-                    )
-                )
-                .subcommand(
-                    SubCommand::with_name("ann")
-                    .about("Benchmark the encryptions per second of an announcement mining")
-                    .arg(
-                        Arg::with_name("threads")
-                            .short("t")
-                            .long("threads")
-                            .help("Number of threads to mine with")
-                            .default_value(&cpus_str)
-                            .takes_value(true),
-                    )
-                )
         )
         .get_matches();
 
