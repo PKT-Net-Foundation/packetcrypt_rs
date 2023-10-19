@@ -135,7 +135,7 @@ fn main() {
         .file("packetcrypt/src/RandGen.c")
         .file("packetcrypt/src/RandHash_interpreted.c")
         .file("packetcrypt/src/PTime.c")
-        .file("packetcrypt/src/Work.c")
+        .file("packetcrypt/src/Work.c"))
         .out_dir(dst.join("lib"))
         .flag("-O2")
         .compile("libpacketcrypt.a");

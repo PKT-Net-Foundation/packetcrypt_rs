@@ -8,7 +8,6 @@
 #include "Buf.h"
 #include "Announce.h"
 #include "packetcrypt/PacketCrypt.h"
-#include "PacketCryptProof.h"
 #include "CryptoCycle.h"
 #include "Conf.h"
 #include "Difficulty.h"

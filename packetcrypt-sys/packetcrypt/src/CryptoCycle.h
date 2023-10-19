@@ -1,4 +1,4 @@
-/**
+    /**
  * (C) Copyright 2019
  * Caleb James DeLisle
  *
@@ -223,18 +223,6 @@ void CryptoCycle_smul(CryptoCycle_State_t* state);
 void CryptoCycle_final(CryptoCycle_State_t* state);
 
 #define CryptoCycle_PAR_STATES 4
-
-#include "packetcrypt/BlockMine.h"
-
-void CryptoCycle_blockMineMulti(
-    CryptoCycle_State_t* pcStates,
-    const Buf32_t* hdrHash,
-    uint32_t nonceBase,
-    uint64_t annCount,
-    const uint32_t* annIndexes,
-    const CryptoCycle_Item_t* anns,
-    BlockMine_Res_t* res
-);
 
 void CryptoCycle_annMineMulti(
     CryptoCycle_State_t* pcStates,
